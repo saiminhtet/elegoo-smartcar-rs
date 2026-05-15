@@ -45,53 +45,25 @@ impl Default for VideoWindowState {
 }
 
 impl VideoWindowState {
-    pub fn show(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Camera Stream")
-            .id(egui::Id::new("video_window"))
-            .open(&mut self.visible)
-            .default_size([720.0, 540.0])
-            .resizable(true)
-            .show(ctx, |ui| {
-                // Video frame display
-                if let Some(frame) = &self.frame_data {
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                        [frame.width as usize, frame.height as usize],
-                        &frame.data,
-                    );
-                    let texture = ui.ctx().load_texture(
-                        "video_frame",
-                        color_image,
-                        egui::TextureOptions::default(),
-                    );
-                    let available = ui.available_size();
-                    ui.add(
-                        egui::Image::new(&texture)
-                            .fit_to_exact_size(available),
-                    );
-                } else {
-                    ui.allocate_space(ui.available_size());
-                    ui.centered_and_justified(|ui| {
-                        ui.label("No video stream");
-                    });
-                }
+    /// Render the camera feed as the central panel (no floating window).
+    /// `stream_active` indicates whether the user has toggled the stream on (V key).
+    pub fn render_embedded(&mut self, ctx: &egui::Context, stream_active: bool) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let available = ui.available_size();
 
-                // Status bar
-                ui.separator();
+            if let Some(frame) = &self.frame_data {
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width as usize, frame.height as usize],
+                    &frame.data,
+                );
+                let texture = ui.ctx().load_texture(
+                    "video_frame",
+                    color_image,
+                    egui::TextureOptions::default(),
+                );
+
+                // Status overlay across the top of the video area
                 ui.horizontal(|ui| {
-                    // FPS counter
-                    ui.label(format!("FPS: {:.1}", self.fps));
-                    if self.dropped_frames > 0 {
-                        ui.label(format!("(-{})", self.dropped_frames));
-                    }
-
-                    ui.separator();
-
-                    // Resolution
-                    ui.label(&self.resolution);
-
-                    ui.separator();
-
-                    // Streaming status
                     let (color, text) = match &self.streaming_status {
                         StreamingStatus::Streaming => {
                             (egui::Color32::from_rgb(78, 201, 176), "Streaming")
@@ -108,23 +80,42 @@ impl VideoWindowState {
                     };
                     ui.colored_label(color, "●");
                     ui.colored_label(color, text);
-
                     ui.separator();
-
-                    // Mode badge
-                    let mode_color = if self.mode > 0 {
-                        egui::Color32::from_rgb(255, 193, 7)
-                    } else {
-                        egui::Color32::from_rgb(78, 201, 176)
-                    };
-                    ui.colored_label(mode_color, format!("Mode {}", self.mode));
-
+                    ui.label(format!("FPS: {:.1}", self.fps));
+                    if self.dropped_frames > 0 {
+                        ui.label(format!("(-{})", self.dropped_frames));
+                    }
                     ui.separator();
-
-                    // Car status
-                    ui.label(&self.car_status);
+                    ui.label(&self.resolution);
                 });
-            });
+                ui.separator();
+
+                let frame_size = ui.available_size();
+                ui.add(
+                    egui::Image::new(&texture).fit_to_exact_size(frame_size),
+                );
+            } else {
+                ui.allocate_ui_with_layout(
+                    available,
+                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| {
+                        if stream_active {
+                            ui.label(
+                                egui::RichText::new("Connecting to camera stream…")
+                                    .size(18.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new("Camera feed off — press V to start")
+                                    .size(18.0)
+                                    .color(egui::Color32::from_rgb(120, 120, 120)),
+                            );
+                        }
+                    },
+                );
+            }
+        });
     }
 
     pub fn update_frame(&mut self, data: Vec<u8>, width: u32, height: u32) {

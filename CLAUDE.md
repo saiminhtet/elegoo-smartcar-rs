@@ -24,8 +24,24 @@ The car's firmware parses commands case-sensitively and silently drops anything 
 
 The app runs eframe (synchronous main thread) and drives tokio futures via `runtime.block_on()`:
 
-- `MainPanel.connection` must be wired up alongside `SmartCarApp.connection` in `SmartCarApp::initialize` — both fields point at the same `Arc<Mutex<ConnectionManager>>`. The key handler returns silently if `MainPanel.connection` is `None`.
+- `MainPanel.connection` and `MainPanel.video_stream` must be wired up alongside `SmartCarApp.connection`/`video_stream` in `SmartCarApp::initialize` — they all point at the same `Arc<Mutex<…>>`. The key handler returns silently if `MainPanel.connection` is `None`; pressing `V` is a no-op if `MainPanel.video_stream` is `None`.
 - In `process_egui_keys`, assign `main_panel.pressed_keys = current_keys` **after** dispatching `on_key_down` calls. `on_key_down` starts with a duplicate-press guard (`if pressed_keys.contains(&key) { return; }`) — assigning beforehand causes every first press to be skipped.
+
+## UI layout
+
+The mission-control layout uses egui's docked panels (no floating windows). Panel call order matters in egui — top/bottom/side panels first, `CentralPanel` last.
+
+- [src/ui/main_panel.rs](src/ui/main_panel.rs) draws the top bars, left controls panel, right info panel, and bottom status bar — but **not** the central panel.
+- [src/app.rs](src/app.rs) calls `VideoWindowState::render_embedded` after `MainPanel::show`; that method owns the `CentralPanel` and renders either the camera feed or a "press V" placeholder.
+- The old floating `VideoWindowState::show` is retained but unused — `#![allow(dead_code)]` is set in [src/main.rs](src/main.rs).
+
+## Icon font
+
+UI glyphs (arrows, gear, video camera, stop square) come from the Phosphor icon font via `egui-phosphor = "0.9"` (pinned — must match egui's minor version; 0.9 → egui 0.31).
+
+- Font is registered once in [src/main.rs](src/main.rs)'s `eframe::run_native` callback: `egui_phosphor::add_to_fonts(&mut fonts, Variant::Regular)`. Don't call this from `App::update` — it runs every frame.
+- Icons are imported as `use egui_phosphor::regular as ph;` then referenced as `ph::ARROW_UP` etc. (each is a `&'static str` holding the codepoint). Use `format!("{}\nW", ph::ARROW_UP)` to combine with text.
+- Don't fall back to Unicode glyphs like `↑`, `↓`, `±`, `▲`, `▼` — egui's default font bundle doesn't cover them on every platform. The triangles `▲ ▼ ◄ ►` happen to be in the Hack font, but the regular arrows aren't.
 
 ## Useful runtime checks
 

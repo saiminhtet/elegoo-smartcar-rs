@@ -29,11 +29,11 @@ A cross-platform desktop application for controlling the **ELEGOO Smart Car V4**
 - **Virtual Controls**: On-screen joystick and racing wheel widgets
 
 ### UI Features
-- Dark theme professional interface
+- Dark theme mission-control layout: **controls left, camera feed center, sensors/modes right, status bar bottom** — no floating windows
+- Phosphor icon font for control buttons (arrows, stop, gear, camera) so glyphs render consistently across platforms
 - Real-time connection and mode indicators
 - Live sensor data display
-- Video stream with FPS counter
-- Resizable camera window
+- Embedded video stream with FPS counter and streaming-status indicator
 - Configurable settings (IP, theme, language)
 
 ## Screenshots

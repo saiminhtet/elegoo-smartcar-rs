@@ -4,6 +4,8 @@ use crate::input::InputEvent;
 use crate::sensor::SensorData;
 use crate::ui::settings::SettingsState;
 use crate::ui::status_bar::StatusBarWidget;
+use crate::video::VideoStreamViewer;
+use egui_phosphor::regular as ph;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -23,6 +25,7 @@ pub enum InputMode {
 
 pub struct MainPanel {
     pub connection: Option<Arc<Mutex<ConnectionManager>>>,
+    pub video_stream: Option<Arc<Mutex<VideoStreamViewer>>>,
     pub sensor_data: SensorData,
     pub is_connected: bool,
     pub current_mode: u32,
@@ -58,6 +61,7 @@ impl MainPanel {
     pub fn new() -> Self {
         Self {
             connection: None,
+            video_stream: None,
             sensor_data: SensorData::default(),
             is_connected: false,
             current_mode: 0,
@@ -287,6 +291,14 @@ impl MainPanel {
             }
             super::super::input::Key::V => {
                 self.video_window_open = !self.video_window_open;
+                if let Some(video) = &self.video_stream {
+                    let video = video.clone();
+                    if self.video_window_open {
+                        video.lock().await.start().await;
+                    } else {
+                        video.lock().await.stop();
+                    }
+                }
                 self.status_message = if self.video_window_open {
                     "Video: On".to_string()
                 } else {
@@ -393,10 +405,10 @@ impl MainPanel {
                     ui.label(input_text);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("⚙ Settings").clicked() {
+                        if ui.button(format!("{} Settings", ph::GEAR_SIX)).clicked() {
                             self.settings_open = !self.settings_open;
                         }
-                        if ui.button("📷 Video").clicked() {
+                        if ui.button(format!("{} Video", ph::VIDEO_CAMERA)).clicked() {
                             self.video_window_open = !self.video_window_open;
                         }
                     });
@@ -423,7 +435,7 @@ impl MainPanel {
                     ui.add_space(60.0);
                     if self.is_connected {
                         let forward_btn = egui::Button::new(
-                            egui::RichText::new("▲\nW").size(14.0),
+                            egui::RichText::new(format!("{}\nW", ph::ARROW_UP)).size(14.0),
                         )
                         .min_size(button_size);
                         if ui.add(forward_btn).clicked() {
@@ -431,7 +443,7 @@ impl MainPanel {
                             // Need async handling - send via connection
                         }
                     } else {
-                        ui.add_sized(button_size, egui::Label::new("▲\nW"));
+                        ui.add_sized(button_size, egui::Label::new(format!("{}\nW", ph::ARROW_UP)));
                     }
                 });
 
@@ -439,19 +451,19 @@ impl MainPanel {
                     ui.add_space(10.0);
                     if self.is_connected {
                         let left_btn = egui::Button::new(
-                            egui::RichText::new("◄\nA").size(14.0),
+                            egui::RichText::new(format!("{}\nA", ph::ARROW_LEFT)).size(14.0),
                         )
                         .min_size(button_size);
                         if ui.add(left_btn).clicked() {
                             let _cmd = commands::car_control(DIR_LEFT, self.speed as u32);
                         }
                     } else {
-                        ui.add_sized(button_size, egui::Label::new("◄\nA"));
+                        ui.add_sized(button_size, egui::Label::new(format!("{}\nA", ph::ARROW_LEFT)));
                     }
 
                     if self.is_connected {
                         let stop_btn = egui::Button::new(
-                            egui::RichText::new("■\nSpace")
+                            egui::RichText::new(format!("{}\nSpace", ph::STOP))
                                 .size(14.0)
                                 .color(egui::Color32::RED),
                         )
@@ -460,19 +472,19 @@ impl MainPanel {
                             // Stop
                         }
                     } else {
-                        ui.add_sized(button_size, egui::Label::new("■\nSpace"));
+                        ui.add_sized(button_size, egui::Label::new(format!("{}\nSpace", ph::STOP)));
                     }
 
                     if self.is_connected {
                         let right_btn = egui::Button::new(
-                            egui::RichText::new("►\nD").size(14.0),
+                            egui::RichText::new(format!("{}\nD", ph::ARROW_RIGHT)).size(14.0),
                         )
                         .min_size(button_size);
                         if ui.add(right_btn).clicked() {
                             let _cmd = commands::car_control(DIR_RIGHT, self.speed as u32);
                         }
                     } else {
-                        ui.add_sized(button_size, egui::Label::new("►\nD"));
+                        ui.add_sized(button_size, egui::Label::new(format!("{}\nD", ph::ARROW_RIGHT)));
                     }
                 });
 
@@ -480,14 +492,14 @@ impl MainPanel {
                     ui.add_space(60.0);
                     if self.is_connected {
                         let backward_btn = egui::Button::new(
-                            egui::RichText::new("▼\nS").size(14.0),
+                            egui::RichText::new(format!("{}\nS", ph::ARROW_DOWN)).size(14.0),
                         )
                         .min_size(button_size);
                         if ui.add(backward_btn).clicked() {
                             let _cmd = commands::car_control(DIR_BACKWARD, self.speed as u32);
                         }
                     } else {
-                        ui.add_sized(button_size, egui::Label::new("▼\nS"));
+                        ui.add_sized(button_size, egui::Label::new(format!("{}\nS", ph::ARROW_DOWN)));
                     }
                 });
 
@@ -542,22 +554,61 @@ impl MainPanel {
 
                 // Camera buttons
                 ui.horizontal(|ui| {
-                    if ui.button("◄ Camera Left").clicked() {
+                    if ui.button(format!("{} Camera Left", ph::ARROW_LEFT)).clicked() {
                         let _cmd = commands::camera_rotation(3);
                     }
-                    if ui.button("Camera Right ►").clicked() {
+                    if ui.button(format!("Camera Right {}", ph::ARROW_RIGHT)).clicked() {
                         let _cmd = commands::camera_rotation(4);
                     }
+                });
+
+            });
+
+        // Right side panel - sensors, modes, status, shortcuts
+        egui::SidePanel::right("info_panel")
+            .resizable(false)
+            .default_width(260.0)
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Sensors").size(16.0).strong());
+                ui.separator();
+                ui.add_space(4.0);
+
+                let sensor = &self.sensor_data;
+
+                ui.horizontal(|ui| {
+                    ui.label("Distance:");
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 220, 202),
+                        sensor.distance_string(),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Battery:");
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 220, 202),
+                        sensor.battery_voltage_string(),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Line:");
+                    let l = if sensor.left_line_detected { "■" } else { "□" };
+                    let m = if sensor.middle_line_detected { "■" } else { "□" };
+                    let r = if sensor.right_line_detected { "■" } else { "□" };
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 220, 202),
+                        format!("L:{} M:{} R:{}", l, m, r),
+                    );
                 });
 
                 ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(8.0);
 
-                // Mode selection
-                ui.label(
-                    egui::RichText::new("Operating Modes").size(14.0).strong(),
-                );
+                // Operating modes
+                ui.label(egui::RichText::new("Operating Modes").size(14.0).strong());
 
                 let modes = [
                     ("0 Manual", egui::Color32::from_rgb(78, 201, 176)),
@@ -575,7 +626,7 @@ impl MainPanel {
                             *color
                         }),
                     )
-                    .min_size(egui::vec2(240.0, 30.0))
+                    .min_size(egui::vec2(220.0, 28.0))
                     .fill(if selected {
                         egui::Color32::from_rgb(60, 60, 60)
                     } else {
@@ -583,116 +634,60 @@ impl MainPanel {
                     });
 
                     if ui.add(btn).clicked() {
-                        // Switch mode via connection
+                        // Switch mode via connection (use 0-3 keys for now)
                     }
                 }
-            });
 
-        // Center panel - status and info
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(8.0);
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-            ui.label(
-                egui::RichText::new("Status").size(16.0).strong(),
-            );
-            ui.separator();
+                // Status message
+                ui.label(egui::RichText::new("Status").size(14.0).strong());
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(78, 201, 176),
+                        &self.status_message,
+                    );
+                });
 
-            // Status message
-            ui.horizontal(|ui| {
-                ui.label("Status:");
-                ui.colored_label(egui::Color32::from_rgb(78, 201, 176), &self.status_message);
-            });
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-            ui.add_space(8.0);
-
-            // Sensor data display
-            ui.label(
-                egui::RichText::new("Sensor Data").size(14.0).strong(),
-            );
-
-            let sensor = &self.sensor_data;
-
-            ui.horizontal(|ui| {
-                ui.label("Distance:");
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 220, 202),
-                    sensor.distance_string(),
+                // Keyboard shortcuts
+                ui.label(egui::RichText::new("Shortcuts").size(14.0).strong());
+                ui.label(
+                    egui::RichText::new(format!(
+                        "WASD  Drive\n\
+                         Space Stop\n\
+                         {}/{}   Speed +/-10\n\
+                         [ / ] Camera\n\
+                         0-3   Mode\n\
+                         V     Video\n\
+                         Esc   Exit",
+                        ph::ARROW_UP, ph::ARROW_DOWN
+                    ))
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
                 );
             });
 
-            ui.horizontal(|ui| {
-                ui.label("Battery:");
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 220, 202),
-                    sensor.battery_voltage_string(),
+        // Bottom status bar
+        egui::TopBottomPanel::bottom("status_bar_panel")
+            .min_height(28.0)
+            .show(ctx, |ui| {
+                self.status_bar.show(
+                    ui,
+                    &self.sensor_data,
+                    self.is_connected,
+                    self.current_mode,
                 );
             });
-
-            ui.horizontal(|ui| {
-                ui.label("Line Tracking:");
-                let l = if sensor.left_line_detected { "■" } else { "□" };
-                let m = if sensor.middle_line_detected { "■" } else { "□" };
-                let r = if sensor.right_line_detected { "■" } else { "□" };
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 220, 202),
-                    format!("L:{} M:{} R:{}", l, m, r),
-                );
-            });
-
-            ui.add_space(16.0);
-
-            // Virtual Joystick area
-            ui.label(
-                egui::RichText::new("Virtual Controls").size(14.0).strong(),
-            );
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui.button("Joystick (J)").clicked() {
-                    // Toggle joystick
-                }
-                if ui.button("Wheel (R)").clicked() {
-                    // Toggle wheel
-                }
-            });
-
-            ui.add_space(8.0);
-
-            // Keyboard guide
-            ui.label(
-                egui::RichText::new("Keyboard Shortcuts").size(14.0).strong(),
-            );
-            ui.separator();
-            ui.label(
-                egui::RichText::new(
-                    "WASD - Drive\n\
-                     Space - Emergency Stop\n\
-                     Up/Down - Speed ±10\n\
-                     [ / ] - Camera Left/Right\n\
-                     0-3 - Switch Mode\n\
-                     J - Joystick Toggle\n\
-                     R - Wheel Toggle\n\
-                     V - Video Toggle\n\
-                     Esc - Exit",
-                )
-                .size(12.0)
-                .color(egui::Color32::from_rgb(170, 170, 170)),
-            );
-
-            ui.add_space(8.0);
-
-            // Status bar at bottom
-            self.status_bar.show(ui, &self.sensor_data, self.is_connected, self.current_mode);
-        });
 
         // Settings window
         if self.settings_open {
             super::settings::show_settings(ctx, &mut self.settings, &mut self.settings_open);
-        }
-
-        // Video window
-        if self.video_window_open {
-            // Shown by app.rs
         }
     }
 }

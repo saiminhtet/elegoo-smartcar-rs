@@ -35,6 +35,7 @@ chrono = "0.4"
 anyhow = "1"
 futures-util = "0.3.32"
 socket2 = "0.6.3"
+egui-phosphor = "0.9.0"
 
 # Optional gamepad support (requires libudev-dev on Linux)
 # gilrs = "0.11"

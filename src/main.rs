@@ -41,9 +41,9 @@ fn main() -> eframe::Result<()> {
     // Configure native options for eframe
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([850.0, 650.0])
-            .with_min_inner_size([700.0, 500.0])
-            .with_title("ELEGOO Smart Car V4 Controller"),
+            .with_inner_size([1280.0, 760.0])
+            .with_min_inner_size([1000.0, 600.0])
+            .with_title("ELEGOO Smart Car V4 Mission Control"),
         ..Default::default()
     };
 
@@ -51,6 +51,12 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "ELEGOO Smart Car V4 Controller",
         native_options,
-        Box::new(|_cc| Ok(Box::new(app))),
+        Box::new(|cc| {
+            // Register Phosphor icon font so directional/arrow glyphs render
+            let mut fonts = egui::FontDefinitions::default();
+            egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+            cc.egui_ctx.set_fonts(fonts);
+            Ok(Box::new(app))
+        }),
     )
 }

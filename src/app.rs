@@ -46,9 +46,12 @@ impl eframe::App for SmartCarApp {
         self.drain_video_events();
 
         self.main_panel.show(ctx);
-        if self.main_panel.video_window_open {
-            self.video_window.show(ctx);
-        }
+
+        // Embed the camera feed as the centerpiece (no floating window).
+        self.video_window.render_embedded(
+            ctx,
+            self.main_panel.video_window_open,
+        );
 
         ctx.request_repaint();
     }
@@ -75,6 +78,7 @@ impl SmartCarApp {
             &config.robot.ip_address,
         )));
         self.video_stream = Some(video.clone());
+        self.main_panel.video_stream = Some(video.clone());
 
         // Connect to car
         let rt_guard = tokio::task::block_in_place(|| {
