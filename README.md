@@ -121,14 +121,16 @@ On first run, a default `application.json` configuration file is created.
 
 ## Command Protocol
 
-All communication uses JSON over TCP port 100. Key commands:
+All communication uses JSON over TCP port 100. **Keys are case-sensitive and uppercase** — the car silently drops anything it doesn't recognize. Examples (wire format):
 
-- **Heartbeat**: `{Heartbeat}` (must echo back)
-- **CarControl** (N=3): `{"D1":3,"D2":100}` (forward at speed 100)
-- **CameraRotation** (N=106): `{"D1":3}` (camera left)
-- **SwitchMode** (N=101): `{"D1":1}` (line detection mode)
-- **CarStop**: `{"N":2,"D1":5,"D2":0,"T":0}` (synthetic stop command)
-- **JoystickClear** (N=100): `{}` (clear autonomous state)
+- **Heartbeat**: `{Heartbeat}` — sent by the car; exact echo back is mandatory
+- **CarControl** (N=3): `{"H":"1","N":3,"D1":3,"D2":100}` — forward at speed 100
+- **CameraRotation** (N=106): `{"N":106,"D1":3}` — camera left
+- **SwitchMode** (N=101): `{"N":101,"D1":1}` — line detection mode
+- **CarStop**: `{"H":"2","N":2,"D1":5,"D2":0,"T":0}` — synthetic stop
+- **JoystickClear** (N=100): `{"N":100}` — clear autonomous state
+
+`H` is a per-message sequence number (string) required on `N=1/2/3/4/5/110`.
 
 The **stop sequence** always sends 3 commands: `CarControl(dir, 0)` → `CarStop()` → `JoystickClear()`.
 
@@ -197,6 +199,7 @@ elegoo-smartcar-rs/
 - **Car not responding**: Ensure the car is powered on and you're connected to its WiFi
 - **Heartbeat timeout**: The car disconnects after ~4 missed heartbeat echoes (auto-handled)
 - **Connection refused**: Verify IP address and port in `application.json`
+- **Connects but WASD does nothing**: Test TCP reachability with `nc -z -v -w 3 <car-ip> 100`. Run with `RUST_LOG=info` and confirm you see `→ Command sent: {"H":"...","N":3,...}` on each keypress — uppercase JSON keys are required by the firmware.
 
 ### Video Stream Issues
 - **No video**: Ensure car has camera module; video starts on port 81
