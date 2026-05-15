@@ -10,6 +10,7 @@ fn next_seq() -> String {
 
 /// Commands that use H (sequence number) field
 #[derive(Serialize)]
+#[serde(rename_all = "UPPERCASE")]
 struct SequencedCommand {
     h: String,
     n: u32,
@@ -25,6 +26,7 @@ struct SequencedCommand {
 
 /// Commands without H (sequence number) field
 #[derive(Serialize)]
+#[serde(rename_all = "UPPERCASE")]
 struct SimpleCommand {
     n: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,4 +315,25 @@ pub fn stop_sequence(last_direction: u32) -> Vec<String> {
 /// Heartbeat command format
 pub fn heartbeat_command() -> &'static str {
     "{Heartbeat}"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn car_control_uses_uppercase_keys() {
+        let cmd = car_control(direction::FORWARD, 100);
+        assert!(cmd.contains("\"N\":3"), "got: {}", cmd);
+        assert!(cmd.contains("\"D1\":3"), "got: {}", cmd);
+        assert!(cmd.contains("\"D2\":100"), "got: {}", cmd);
+        assert!(cmd.contains("\"H\":"), "got: {}", cmd);
+        assert!(!cmd.contains("\"n\":"), "lowercase key found: {}", cmd);
+    }
+
+    #[test]
+    fn joystick_clear_uses_uppercase_keys() {
+        let cmd = joystick_clear();
+        assert_eq!(cmd, "{\"N\":100}");
+    }
 }

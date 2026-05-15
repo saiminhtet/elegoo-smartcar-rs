@@ -91,6 +91,7 @@ impl SensorData {
 /// JSON response format from car: {"N":21,"D":44} for ultrasonic
 /// or {"N":22,"D1":0,"D2":1,"D3":1} for line tracking
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub struct CarJsonResponse {
     pub n: Option<u32>,
     pub d: Option<u32>,

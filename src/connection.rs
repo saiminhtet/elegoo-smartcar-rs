@@ -4,9 +4,9 @@ use chrono::Utc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
-// use std::net::SocketAddr;
 use tokio::time::sleep;
 
 pub enum ConnectionEvent {
@@ -25,7 +25,6 @@ pub struct ConnectionManager {
 }
 
 struct ConnectionInner {
-    stream: Option<TcpStream>,
     is_connected: bool,
     last_heartbeat_received: chrono::DateTime<Utc>,
     last_keep_alive_sent: chrono::DateTime<Utc>,
@@ -33,7 +32,7 @@ struct ConnectionInner {
     current_mode: u32,
     last_line_sensor_requested: i32,
     current_sensor_data: SensorData,
-    send_queue: Vec<String>,
+    cmd_tx: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl ConnectionManager {
@@ -43,7 +42,6 @@ impl ConnectionManager {
             ip_address: ip_address.to_string(),
             port,
             inner: Arc::new(Mutex::new(ConnectionInner {
-                stream: None,
                 is_connected: false,
                 last_heartbeat_received: Utc::now(),
                 last_keep_alive_sent: Utc::now(),
@@ -51,7 +49,7 @@ impl ConnectionManager {
                 current_mode: 0,
                 last_line_sensor_requested: -1,
                 current_sensor_data: SensorData::default(),
-                send_queue: Vec::new(),
+                cmd_tx: None,
             })),
             event_tx,
             event_rx: Arc::new(Mutex::new(event_rx)),
@@ -68,9 +66,6 @@ impl ConnectionManager {
 
         match TcpStream::connect(&addr).await {
             Ok(stream) => {
-                // Configure TCP settings
-                // Configure TCP for low-latency control
-                // Using raw socket option since tokio's set_keepalive may not be available
                 stream.set_nodelay(true).ok();
                 use socket2::{SockRef, TcpKeepalive};
                 let s = SockRef::from(&stream);
@@ -79,40 +74,39 @@ impl ConnectionManager {
 
                 tracing::info!("Connected successfully to {}", addr);
 
-                let mut inner = self.inner.lock().await;
-                inner.stream = Some(stream);
-                inner.is_connected = true;
-                inner.last_heartbeat_received = Utc::now();
+                let (reader, writer) = stream.into_split();
+                let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<String>();
 
-                // Start background tasks
+                {
+                    let mut inner = self.inner.lock().await;
+                    inner.is_connected = true;
+                    inner.last_heartbeat_received = Utc::now();
+                    inner.cmd_tx = Some(cmd_tx);
+                }
+
                 let event_tx = self.event_tx.clone();
-                let inner_clone = self.inner.clone();
+                let inner_arc = self.inner.clone();
 
-                // Receive loop
-                let rx_inner = inner_clone.clone();
+                let rx_inner = inner_arc.clone();
                 let rx_tx = event_tx.clone();
                 tokio::spawn(async move {
-                    Self::receive_loop(rx_inner, rx_tx).await;
+                    Self::receive_loop(reader, rx_inner, rx_tx).await;
                 });
 
-                // Send loop
-                let tx_inner = inner_clone.clone();
+                let tx_inner = inner_arc.clone();
                 let tx_tx = event_tx.clone();
                 tokio::spawn(async move {
-                    Self::send_loop(tx_inner, tx_tx).await;
+                    Self::send_loop(writer, cmd_rx, tx_inner, tx_tx).await;
                 });
 
-                // Heartbeat monitor
-                let hb_inner = inner_clone.clone();
+                let hb_inner = inner_arc.clone();
                 tokio::spawn(async move {
                     Self::heartbeat_monitor(hb_inner).await;
                 });
 
-                // Sensor polling
-                let sensor_inner = inner_clone.clone();
-                let sensor_tx = event_tx.clone();
+                let sensor_inner = inner_arc.clone();
                 tokio::spawn(async move {
-                    Self::sensor_polling(sensor_inner, sensor_tx).await;
+                    Self::sensor_polling(sensor_inner).await;
                 });
 
                 let _ = event_tx.send(ConnectionEvent::ConnectionStatusChanged(true));
@@ -131,9 +125,16 @@ impl ConnectionManager {
             tracing::warn!("Not connected. Command not sent: {}", command);
             return;
         }
-        tracing::debug!("Queuing command: {}", command);
         inner.last_command_sent = Utc::now();
-        inner.send_queue.push(command.to_string());
+        if let Some(tx) = &inner.cmd_tx {
+            if tx.send(command.to_string()).is_err() {
+                tracing::error!("Command channel closed; marking disconnected");
+                inner.is_connected = false;
+                inner.cmd_tx = None;
+            } else {
+                tracing::debug!("Queued command: {}", command);
+            }
+        }
     }
 
     /// Switch car operating mode. Mode 0 uses JoystickClear, modes 1-3 use SwitchMode.
@@ -166,56 +167,45 @@ impl ConnectionManager {
         self.inner.lock().await.current_sensor_data.clone()
     }
 
-    async fn receive_loop(inner: Arc<Mutex<ConnectionInner>>, event_tx: mpsc::UnboundedSender<ConnectionEvent>) {
+    async fn receive_loop(
+        mut reader: OwnedReadHalf,
+        inner: Arc<Mutex<ConnectionInner>>,
+        event_tx: mpsc::UnboundedSender<ConnectionEvent>,
+    ) {
         let mut buffer = vec![0u8; 4096];
         let mut message_buf = String::new();
 
         loop {
-            let data = {
-                let mut guard = inner.lock().await;
-                if !guard.is_connected {
-                    sleep(Duration::from_millis(100)).await;
-                    continue;
+            match reader.read(&mut buffer).await {
+                Ok(0) => {
+                    tracing::error!("Connection closed by remote host (0 bytes read)");
+                    let mut guard = inner.lock().await;
+                    guard.is_connected = false;
+                    guard.cmd_tx = None;
+                    let _ = event_tx.send(ConnectionEvent::ConnectionStatusChanged(false));
+                    return;
                 }
-                match guard.stream.as_mut() {
-                    Some(stream) => {
-                        match stream.read(&mut buffer).await {
-                            Ok(0) => {
-                                tracing::error!("Connection closed by remote host (0 bytes read)");
-                                guard.is_connected = false;
-                                let _ = event_tx.send(ConnectionEvent::ConnectionStatusChanged(false));
-                                return;
-                            }
-                            Ok(n) => Some(buffer[..n].to_vec()),
-                            Err(e) => {
-                                // Try reconnect after error
-                                tracing::error!("Receive error: {}", e);
-                                guard.is_connected = false;
-                                let _ = event_tx.send(ConnectionEvent::ConnectionStatusChanged(false));
-                                return;
-                            }
-                        }
+                Ok(n) => {
+                    let raw = String::from_utf8_lossy(&buffer[..n]).to_string();
+                    if !raw.contains("{Heartbeat}") {
+                        tracing::debug!("← Received: {}", raw.trim());
                     }
-                    None => {
-                        sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
+                    message_buf.push_str(&raw);
+                    Self::process_messages(&mut message_buf, &inner, &event_tx).await;
                 }
-            };
-
-            if let Some(data) = data {
-                let raw = String::from_utf8_lossy(&data).to_string();
-                if !raw.contains("{Heartbeat}") {
-                    tracing::debug!("← Received: {}", raw.trim());
+                Err(e) => {
+                    tracing::error!("Receive error: {}", e);
+                    let mut guard = inner.lock().await;
+                    guard.is_connected = false;
+                    guard.cmd_tx = None;
+                    let _ = event_tx.send(ConnectionEvent::ConnectionStatusChanged(false));
+                    return;
                 }
-
-                message_buf.push_str(&raw);
-                Self::process_messages(&mut message_buf, &inner, &event_tx);
             }
         }
     }
 
-    fn process_messages(
+    async fn process_messages(
         buffer: &mut String,
         inner: &Arc<Mutex<ConnectionInner>>,
         event_tx: &mpsc::UnboundedSender<ConnectionEvent>,
@@ -228,19 +218,16 @@ impl ConnectionManager {
             let end = pos + "{Heartbeat}".len();
             processed_len = processed_len.max(end);
 
-            // Schedule heartbeat echo on the inner state
-            let inner_clone = inner.clone();
-            let _tx = event_tx.clone();
-            tokio::spawn(async move {
-                let mut guard = inner_clone.lock().await;
-                guard.last_heartbeat_received = Utc::now();
-                let now = Utc::now();
-                let since_last = now - guard.last_keep_alive_sent;
-                if since_last.num_milliseconds() >= 500 {
-                    guard.last_keep_alive_sent = now;
-                    guard.send_queue.push("{Heartbeat}".to_string());
+            let mut guard = inner.lock().await;
+            guard.last_heartbeat_received = Utc::now();
+            let now = Utc::now();
+            let since_last = now - guard.last_keep_alive_sent;
+            if since_last.num_milliseconds() >= 500 {
+                guard.last_keep_alive_sent = now;
+                if let Some(tx) = &guard.cmd_tx {
+                    let _ = tx.send("{Heartbeat}".to_string());
                 }
-            });
+            }
         }
 
         // Process error messages
@@ -267,14 +254,12 @@ impl ConnectionManager {
                     let absolute_close = absolute_open + close + 1;
                     let content = &data[absolute_open..absolute_close];
 
-                    // Skip already processed heartbeat
                     if content == "{Heartbeat}" {
                         idx = absolute_close;
                         processed_len = idx;
                         continue;
                     }
 
-                    // Check for {ok} or {N_ok} acknowledgments
                     if content == "{ok}" || content.len() > 3
                         && content.starts_with('{')
                         && content.ends_with("_ok}")
@@ -282,46 +267,41 @@ impl ConnectionManager {
                         tracing::debug!("✓ Acknowledgment: {}", content);
                         idx = absolute_close;
                         processed_len = idx;
-                        // Notify listeners
                         let _ = event_tx.send(ConnectionEvent::MessageReceived(content.to_string()));
                         continue;
                     }
 
-                    // Check for raw sensor response {id_value}
                     if let Some((_id, value)) = sensor::parse_raw_sensor_value(content) {
-                        if let Ok(mut guard) = inner.try_lock() {
-                            if guard.last_line_sensor_requested >= 0 {
-                                // Line tracking sensor response
-                                let detected = value < 500;
-                                match guard.last_line_sensor_requested {
-                                    0 => {
-                                        guard.current_sensor_data.left_line_detected = detected;
-                                        guard.current_sensor_data.raw_ir_left = value as i32;
-                                    }
-                                    1 => {
-                                        guard.current_sensor_data.middle_line_detected = detected;
-                                        guard.current_sensor_data.raw_ir_middle = value as i32;
-                                    }
-                                    2 => {
-                                        guard.current_sensor_data.right_line_detected = detected;
-                                        guard.current_sensor_data.raw_ir_right = value as i32;
-                                    }
-                                    _ => {}
+                        let mut guard = inner.lock().await;
+                        if guard.last_line_sensor_requested >= 0 {
+                            let detected = value < 500;
+                            match guard.last_line_sensor_requested {
+                                0 => {
+                                    guard.current_sensor_data.left_line_detected = detected;
+                                    guard.current_sensor_data.raw_ir_left = value as i32;
                                 }
-                                guard.current_sensor_data.line_tracking_timestamp = Some(Utc::now());
-                                guard.last_line_sensor_requested = -1;
-                                let _ = event_tx.send(ConnectionEvent::SensorDataUpdated(
-                                    guard.current_sensor_data.clone(),
-                                ));
-                            } else {
-                                // Ultrasonic sensor response
-                                guard.current_sensor_data.ultrasonic_distance = value as i32;
-                                guard.current_sensor_data.raw_ultrasonic = value as i32;
-                                guard.current_sensor_data.ultrasonic_timestamp = Some(Utc::now());
-                                let _ = event_tx.send(ConnectionEvent::SensorDataUpdated(
-                                    guard.current_sensor_data.clone(),
-                                ));
+                                1 => {
+                                    guard.current_sensor_data.middle_line_detected = detected;
+                                    guard.current_sensor_data.raw_ir_middle = value as i32;
+                                }
+                                2 => {
+                                    guard.current_sensor_data.right_line_detected = detected;
+                                    guard.current_sensor_data.raw_ir_right = value as i32;
+                                }
+                                _ => {}
                             }
+                            guard.current_sensor_data.line_tracking_timestamp = Some(Utc::now());
+                            guard.last_line_sensor_requested = -1;
+                            let _ = event_tx.send(ConnectionEvent::SensorDataUpdated(
+                                guard.current_sensor_data.clone(),
+                            ));
+                        } else {
+                            guard.current_sensor_data.ultrasonic_distance = value as i32;
+                            guard.current_sensor_data.raw_ultrasonic = value as i32;
+                            guard.current_sensor_data.ultrasonic_timestamp = Some(Utc::now());
+                            let _ = event_tx.send(ConnectionEvent::SensorDataUpdated(
+                                guard.current_sensor_data.clone(),
+                            ));
                         }
 
                         idx = absolute_close;
@@ -329,7 +309,6 @@ impl ConnectionManager {
                         continue;
                     }
 
-                    // Try parsing as JSON
                     if let Ok(json_resp) =
                         serde_json::from_str::<CarJsonResponse>(content)
                     {
@@ -337,36 +316,35 @@ impl ConnectionManager {
                             content.to_string(),
                         ));
                         if let Some(n) = json_resp.n {
-                            if let Ok(mut guard) = inner.try_lock() {
-                                match n {
-                                    21 => {
-                                        if let Some(d) = json_resp.d {
-                                            guard.current_sensor_data.ultrasonic_distance = d as i32;
-                                            guard.current_sensor_data.raw_ultrasonic = d as i32;
-                                            guard.current_sensor_data.ultrasonic_timestamp =
-                                                Some(Utc::now());
-                                            let _ = event_tx.send(
-                                                ConnectionEvent::SensorDataUpdated(
-                                                    guard.current_sensor_data.clone(),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                    22 => {
-                                        guard.current_sensor_data.left_line_detected =
-                                            json_resp.d1.unwrap_or(1) == 0;
-                                        guard.current_sensor_data.middle_line_detected =
-                                            json_resp.d2.unwrap_or(1) == 0;
-                                        guard.current_sensor_data.right_line_detected =
-                                            json_resp.d3.unwrap_or(1) == 0;
-                                        guard.current_sensor_data.line_tracking_timestamp =
+                            let mut guard = inner.lock().await;
+                            match n {
+                                21 => {
+                                    if let Some(d) = json_resp.d {
+                                        guard.current_sensor_data.ultrasonic_distance = d as i32;
+                                        guard.current_sensor_data.raw_ultrasonic = d as i32;
+                                        guard.current_sensor_data.ultrasonic_timestamp =
                                             Some(Utc::now());
-                                        let _ = event_tx.send(ConnectionEvent::SensorDataUpdated(
-                                            guard.current_sensor_data.clone(),
-                                        ));
+                                        let _ = event_tx.send(
+                                            ConnectionEvent::SensorDataUpdated(
+                                                guard.current_sensor_data.clone(),
+                                            ),
+                                        );
                                     }
-                                    _ => {}
                                 }
+                                22 => {
+                                    guard.current_sensor_data.left_line_detected =
+                                        json_resp.d1.unwrap_or(1) == 0;
+                                    guard.current_sensor_data.middle_line_detected =
+                                        json_resp.d2.unwrap_or(1) == 0;
+                                    guard.current_sensor_data.right_line_detected =
+                                        json_resp.d3.unwrap_or(1) == 0;
+                                    guard.current_sensor_data.line_tracking_timestamp =
+                                        Some(Utc::now());
+                                    let _ = event_tx.send(ConnectionEvent::SensorDataUpdated(
+                                        guard.current_sensor_data.clone(),
+                                    ));
+                                }
+                                _ => {}
                             }
                         }
                         idx = absolute_close;
@@ -376,48 +354,38 @@ impl ConnectionManager {
 
                     idx = absolute_close + 1;
                 } else {
-                    break; // Incomplete JSON, wait for more data
+                    break;
                 }
             } else {
                 break;
             }
         }
 
-        // Remove processed data
         if processed_len > 0 {
             buffer.drain(..processed_len);
         }
     }
 
-    async fn send_loop(inner: Arc<Mutex<ConnectionInner>>, _event_tx: mpsc::UnboundedSender<ConnectionEvent>) {
-        loop {
-            // Wait before polling
-            sleep(Duration::from_millis(10)).await;
-
-            let command = {
+    async fn send_loop(
+        mut writer: OwnedWriteHalf,
+        mut cmd_rx: mpsc::UnboundedReceiver<String>,
+        inner: Arc<Mutex<ConnectionInner>>,
+        event_tx: mpsc::UnboundedSender<ConnectionEvent>,
+    ) {
+        while let Some(cmd) = cmd_rx.recv().await {
+            if let Err(e) = writer.write_all(cmd.as_bytes()).await {
+                tracing::error!("Send failed: {}", e);
                 let mut guard = inner.lock().await;
-                if !guard.is_connected {
-                    continue;
-                }
-                guard.send_queue.pop()
-            };
-
-            if let Some(cmd) = command {
-                let mut guard = inner.lock().await;
-                if let Some(stream) = guard.stream.as_mut() {
-                    let bytes = cmd.as_bytes();
-                    if let Err(e) = stream.write_all(bytes).await {
-                        tracing::error!("Send failed: {}", e);
-                        guard.is_connected = false;
-                        let _ = _event_tx.send(ConnectionEvent::ConnectionStatusChanged(false));
-                        return;
-                    }
-                    if cmd != "{Heartbeat}" {
-                        tracing::info!("→ Command sent: {}", cmd);
-                    }
-                }
+                guard.is_connected = false;
+                guard.cmd_tx = None;
+                let _ = event_tx.send(ConnectionEvent::ConnectionStatusChanged(false));
+                return;
+            }
+            if cmd != "{Heartbeat}" {
+                tracing::info!("→ Command sent: {}", cmd);
             }
         }
+        tracing::debug!("Send loop exiting (channel closed)");
     }
 
     async fn heartbeat_monitor(inner: Arc<Mutex<ConnectionInner>>) {
@@ -433,40 +401,32 @@ impl ConnectionManager {
             if elapsed > 30 {
                 tracing::warn!("Heartbeat timeout - no heartbeat for {}s", elapsed);
                 guard.is_connected = false;
-                // Attempt reconnection
-                tokio::spawn(async move {
-                    sleep(Duration::from_secs(2)).await;
-                    // Reconnection will be handled by the app layer
-                });
+                guard.cmd_tx = None;
             } else if elapsed > 10 {
                 tracing::warn!("Slow heartbeat - last received {}s ago", elapsed);
             }
         }
     }
 
-    async fn sensor_polling(inner: Arc<Mutex<ConnectionInner>>, _event_tx: mpsc::UnboundedSender<ConnectionEvent>) {
+    async fn sensor_polling(inner: Arc<Mutex<ConnectionInner>>) {
         sleep(Duration::from_secs(5)).await;
         tracing::info!("Sensor polling service started");
 
         loop {
             sleep(Duration::from_secs(5)).await;
 
-            let mode = {
+            let (mode, cmd_tx) = {
                 let guard = inner.lock().await;
-                guard.current_mode
+                (guard.current_mode, guard.cmd_tx.clone())
             };
 
-            // In manual mode (0), periodically poll ultrasonic sensor
+            let Some(tx) = cmd_tx else { continue };
+
             if mode == 0 {
-                let cmd = commands::ultrasonic_status(1);
-                let mut guard = inner.lock().await;
-                guard.send_queue.push(cmd);
+                let _ = tx.send(commands::ultrasonic_status(1));
             } else {
-                // In autonomous modes, re-assert mode to maintain autonomous operation
                 tracing::debug!("Re-asserting Mode {} for autonomous operation", mode);
-                let cmd = commands::switch_mode(mode);
-                let mut guard = inner.lock().await;
-                guard.send_queue.push(cmd);
+                let _ = tx.send(commands::switch_mode(mode));
             }
         }
     }

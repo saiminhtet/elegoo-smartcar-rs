@@ -69,6 +69,7 @@ impl SmartCarApp {
             config.robot.port,
         )));
         self.connection = Some(conn.clone());
+        self.main_panel.connection = Some(conn.clone());
 
         let video = Arc::new(Mutex::new(VideoStreamViewer::new(
             &config.robot.ip_address,
@@ -128,7 +129,6 @@ impl SmartCarApp {
             .copied()
             .filter(|k| !current_keys.contains(k))
             .collect();
-        self.main_panel.pressed_keys = current_keys;
 
         let rt = self.runtime.clone();
         tokio::task::block_in_place(|| {
@@ -140,6 +140,8 @@ impl SmartCarApp {
                 rt_guard.block_on(self.main_panel.on_key_up(key));
             }
         });
+
+        self.main_panel.pressed_keys = current_keys;
     }
 
     fn drain_connection_events(&mut self) {
